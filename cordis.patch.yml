@@ -1,0 +1,4 @@
+- insert:
+    - id: agent-code-search
+      name: dsh-code-search
+      config: {}
