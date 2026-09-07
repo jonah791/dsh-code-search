@@ -1,5 +1,11 @@
 # dsh-code-search
 
+
+<p align="center">
+  <a href="https://github.com/jonah791/dsh-code-search"><img src="https://img.shields.io/badge/version-0.1.0-blue" alt="version"></a>
+  <img src="https://img.shields.io/badge/License-MIT-green" alt="license">
+  <img src="https://img.shields.io/badge/TypeScript-3178C6" alt="TypeScript">
+</p>
 > 本地代码/文件智能检索：封装系统 rg（ripgrep），排除噪音，精准定位。
 > DeepSeek Harness 自研插件 · v0.1.0
 
