@@ -8,6 +8,11 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { execFile } from 'node:child_process'
+import {
+  classifyRgOutcome, resolveRgPath, buildSearchArgv, buildLocateArgv,
+  parseRgJsonLines, parseFileList, rgFailureResult,
+} from './rg.js'
+import type { SearchArgs, LocateArgs, SearchMatch } from './rg.js'
 
 export const name = 'agent-code-search'
 export const inject = ['tools'] as const
@@ -32,84 +37,34 @@ export const Config = z.object({
   ]),
 })
 
-/** spawn rg 并收集 stdout/stderr。rg 无匹配时 exit code=1 但不算错误。 */
-function runRg(rgPath: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+/** spawn rg 并收集 stdout/stderr。rg 无匹配时 exit code=1 但不算错误。
+ *  退出码归类交给纯函数 `classifyRgOutcome`——**spawn 层失败（ENOENT/EACCES）与信号终止不再被
+ *  当成「无匹配」**（修复前：`err.code` 为字符串时被归一为 1，与 rg 的「无匹配」哨兵同形）。 */
+function runRg(rgPath: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string; failure: string | null }> {
   return new Promise((resolvePromise) => {
     execFile(rgPath, args, { maxBuffer: 64 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
-      let code = 0
-      if (err) {
-        const maybe = (err as { code?: unknown }).code
-        code = typeof maybe === 'number' ? maybe : 1
-      }
-      resolvePromise({ code, stdout, stderr })
+      const { code, failure } = classifyRgOutcome(err, stderr)
+      resolvePromise({ code, stdout, stderr, failure })
     })
   })
 }
 
-interface SearchArgs {
-  pattern: string
-  path?: string
-  include?: string
-  exclude?: string
-  maxResults?: number
-}
-
-interface SearchMatch {
-  path: string
-  lineNo: number
-  text: string
-  error?: string
-}
-
-/** code_search 实现：默认排除噪音，返回匹配行。用 rg --json 解析（Windows 盘符安全）。 */
+/** code_search 实现：默认排除噪音，返回匹配行。用 rg --json 解析（Windows 盘符安全）。
+ *  纯逻辑（argv 拼装 / 输出解析 / 退出码归类）在 `src/rg.ts`，此处只做接线。 */
 async function searchCode(args: SearchArgs, cfg: Config): Promise<{ count: number; results: SearchMatch[] }> {
-  const rg = cfg.rgPath || 'rg'
-  const root = args.path || cfg.defaultPath
-  const excludes = [...cfg.noiseExcludes]
-  if (args.exclude) excludes.push('!' + args.exclude)
-  const argv: string[] = ['--json', '--color', 'never']
-  for (const e of excludes) argv.push('--glob', e)
-  if (args.include) argv.push('--glob', args.include)
-  argv.push('--regexp', args.pattern, root)
-  const { code, stdout, stderr } = await runRg(rg, argv)
-  if (stderr && code !== 1) return { count: 0, results: [{ path: '', lineNo: 0, text: '', error: stderr.slice(0, 500) }] }
-  const results: SearchMatch[] = []
-  const cap = args.maxResults ?? 50
-  for (const line of stdout.split('\n')) {
-    if (!line.trim() || results.length >= cap) continue
-    try {
-      const rec = JSON.parse(line) as { type?: string; data?: { path?: { text?: string }; line_number?: number; lines?: { text?: string } } }
-      if (rec.type !== 'match' || !rec.data) continue
-      results.push({
-        path: rec.data.path?.text ?? '',
-        lineNo: rec.data.line_number ?? 0,
-        text: (rec.data.lines?.text ?? '').replace(/\n$/, ''),
-      })
-    } catch { /* 非 JSON 行跳过 */ }
-  }
+  const { stdout, failure } = await runRg(resolveRgPath(cfg), buildSearchArgv(args, cfg))
+  if (failure) return rgFailureResult(failure)
+  const results = parseRgJsonLines(stdout, args.maxResults ?? 50)
   return { count: results.length, results }
 }
 
-interface LocateArgs {
-  term: string
-  path?: string
-  include?: string
-  maxResults?: number
-}
-
-/** code_locate 实现：rg --files-with-matches 只列文件。 */
-async function locateFile(args: LocateArgs, cfg: Config): Promise<{ count: number; files: string[] }> {
-  const rg = cfg.rgPath || 'rg'
-  const root = args.path || cfg.defaultPath
-  const argv: string[] = ['--files-with-matches', '--color', 'never']
-  for (const e of cfg.noiseExcludes) argv.push('--glob', e)
-  if (args.include) argv.push('--glob', args.include)
-  argv.push('--regexp', args.term, root)
-  const { code, stdout, stderr } = await runRg(rg, argv)
-  if (stderr && code !== 1) return { count: 0, files: [] }
-  const files = stdout.split('\n').filter((l) => l.trim())
-  const cap = args.maxResults ?? 30
-  return { count: files.length, files: files.slice(0, cap) }
+/** code_locate 实现：rg --files-with-matches 只列文件。
+ *  **失败不再静默**：spawn 失败/非零退出码回 `error`（修复前与「无匹配」同形：`{count:0, files:[]}`）。 */
+async function locateFile(args: LocateArgs, cfg: Config): Promise<{ count: number; files: string[]; error?: string }> {
+  const { stdout, failure } = await runRg(resolveRgPath(cfg), buildLocateArgv(args, cfg))
+  if (failure) return { count: 0, files: [], error: failure }
+  const { total, files } = parseFileList(stdout, args.maxResults ?? 30)
+  return { count: total, files }
 }
 
 export function apply(ctx: Context, config: Config): void {
@@ -159,9 +114,13 @@ export function apply(ctx: Context, config: Config): void {
         properties: {
           count: { type: 'number' },
           files: { type: 'array', items: { type: 'string' } },
+          error: { type: 'string' },
         },
       },
-      render: (_a: unknown, v: { count?: number; files?: string[] }) => [{ type: 'text', text: `共 ${v.count ?? 0} 个文件\n` + (v.files ?? []).join('\n') }],
+      render: (_a: unknown, v: { count?: number; files?: string[]; error?: string }) => {
+        if (v.error) return [{ type: 'text', text: 'code_locate 错误: ' + v.error }]
+        return [{ type: 'text', text: `共 ${v.count ?? 0} 个文件\n` + (v.files ?? []).join('\n') }]
+      },
     },
     async execute(args: LocateArgs) {
       return locateFile(args, config)
