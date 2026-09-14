@@ -90,15 +90,52 @@ dsh-code-search · apply(ctx, config)
 | 调用方 | 调用点（文件:符号） | 时机 |
 |-------|------------------|------|
 | web 组合 | `.dsh/profiles/web/cordis.patch.yml:232`（`id: agent-code-search`，无 config） | web 启动装载（**唯一挂载点**） |
-| 插件自身 | `src/index.ts:118` `ctx.tools.register(defineTool({name:'code_search' …}))` | 装载时注册 |
-| 插件自身 | `src/index.ts:147` `ctx.tools.register(defineTool({name:'code_locate' …}))` | 装载时注册 |
-| 插件自身 | `src/index.ts:171` `logger.info('dsh-code-search 就绪（rg=' + (config.rgPath \|\| 'rg(PATH)') + '）')` | 装载成功（**宿主 logger 不落盘**） |
+| 插件自身 | `src/index.ts:124` `ctx.tools.register(defineTool({name:'code_search' …}))` | 装载时注册 |
+| 插件自身 | `src/index.ts:154` `ctx.tools.register(defineTool({name:'code_locate' …}))` | 装载时注册 |
+| 插件自身 | `src/index.ts:190` `logger.info('dsh-code-search 就绪（rg=' + (config.rgPath \|\| 'rg(PATH)') + '）')` | 装载成功（**宿主 logger 不落盘**） |
+| 插件自身 | `src/index.ts:89` `traced(...)` —— **两个工具执行体的唯一收口**（观测层单点落笔，见 §4.4） | 每次工具调用 |
+| 插件自身 | `src/index.ts:183` `codeSearchTrace({phase:'boot' …})` | `apply()` 装载（进程级构建自报，Q1） |
 | 依赖服务 | `src/index.ts:inject = ['tools']` | cordis 激活门 |
 | 技能（消费方） | `alice-self-assets/skills/rg-wrapper-tool-development/SKILL.md:8`（本插件即该技能的方法论来源） | 检索需求 |
 | 技能（消费方） | `alice-self-assets/skills/rg-wrapper-tool-development/SKILL.md:38`（「code_locate 找 JsonValue 秒定位」） | 上线后真实场景验证 |
 | 技能（消费方） | 本会话工具面（`code_search`/`code_locate` 直接出现在工具列表中——本次补课任务即用它取证） | 任意检索 |
-| 外部子进程 | `execFile(<rgPath \|\| 'rg'>, argv)`（`src/index.ts:38`） | 每次工具调用 |
-| 落盘产物 | **无**（无缓存/索引/侧车轨迹） | — |
+| 外部子进程 | `execFile(<rgPath \|\| 'rg'>, argv)`（`src/index.ts:57`） | 每次工具调用 |
+| 落盘产物 | `<DSH_HOME>/code-search-trace.jsonl`（自证侧车，2026-09-14 批次 S4-A 新增，见 §4.4） | 每次 `apply()` + 每次工具调用 |
+
+### 4.4 自证轨迹契约（`<DSH_HOME>/code-search-trace.jsonl`）`[MUST]`
+
+**动机**：本插件修过一个静默失效缺陷——`rg` 不存在时 `code_search` 报「0 匹配」，与「真的没有」同形。
+修复只保证「这一次」；**让同类问题下次一眼可见**才是语义层需求（AGENTS.md §5.22 规则 1）。
+
+- **落盘路径**：`<DSH_HOME>/code-search-trace.jsonl`（`DSH_HOME` 环境变量优先，缺省 `<homedir>/.dsh`；
+  解析走 `src/trace.ts:resolveHome` **单一真源**）。追加式 JSONL，一行一事件。
+- **阶段枚举**（`CodeSearchTracePhase`，闭集）：`boot`（`apply()` 时的进程级构建自报）
+  → `search`（`code_search`）→ `locate`（`code_locate`）。**无自由阶段字符串**。
+- **行 schema**（字段固定，`boot` 行用中性值填充，`tail` 后可直接读列）：
+
+  | 字段 | 含义 | 回答哪一问 |
+  |------|------|-----------|
+  | `atMs` | 写入时刻（ms epoch） | 时间线 join |
+  | `phase` | `boot` / `search` / `locate` | Q2 谁发起 |
+  | `build` | `<version>@<模块 mtime ms>` | **Q1 线上跑的是哪个构建** |
+  | `op` | `code_search` / `code_locate` / `apply` | Q2 谁发起 |
+  | `query` | pattern/term（**脱敏 + 截断 120**） | Q2 输入侧 |
+  | `root` / `include` / `exclude` | 生效的检索范围 | Q2/Q4 |
+  | `noiseGlobs` | 生效的噪音排除 glob 条数 | Q4 |
+  | `noisePolicy` | `strict` / `include-overridden` / `none` | **Q4 噪音排除真的生效了吗** |
+  | `maxResults` | 结果上限（search 缺省 50 / locate 缺省 30） | Q4 预算 |
+  | `exitCode` | rg 退出码（`-1` = 未执行到子进程） | **Q3 断在哪一段** |
+  | `count` | 命中数（匹配数 / 文件数） | Q4 结果质量 |
+  | `durationMs` | rg 全量子进程耗时 | Q5 |
+  | `ok` | 成功与否（**无匹配也 `true`**，只有失败才 `false`） | **Q3** |
+  | `error?` | 失败原因（spawn 分类 / 信号终止 / stderr 前 500） | Q3 断点分类 |
+
+- **不变量**：① **`exitCode=1` 且 `ok=false` 只可能是失败**，绝不等同「无匹配」（`ok=true, count=0`）；
+  ② **`query` 落盘前必经 `redactQuery`**——凭据形状串一个字符都不落盘（§7 A16 有尸体测试）；
+  ③ **观测绝不反噬主流程**：`appendTraceEntry` 全部 IO 失败吞错并返回 `false`，业务异常原样重抛。
+- **调用点清单**：`src/index.ts:89 traced()`（唯一收口，包住两个执行体）+ `src/index.ts:183` boot 行。
+  **新增工具必须经 `traced()` 落笔**——绕开它 = 悄悄制造新的观测盲区。
+- **查询方式**：`tail -3 <DSH_HOME>/code-search-trace.jsonl`（最近三次检索的五问）。
 
 ## 5 · 边界与信任
 
@@ -140,15 +177,21 @@ dsh-code-search · apply(ctx, config)
 | A10 | argv 拼装与输出解析有离线单测（含失败/退化路径） | `npm test` → `tests/rg.test.mjs` 26 例：空模式/空 include/损坏 JSON 行/缺字段/`cap=0`/负数 cap/空输出 | **已实测（2026-09-14）** |
 | A11 | 用户输入不得经 shell 解析（注入面守卫） | `npm test` → `tests/shell-contract.test.mjs`：扫描 `src/*.ts` 无 `exec(`/`spawn(`/`execSync`/`spawnSync`/`shell:true`；**尸体样本**（三种坏形态）先证明扫描器会命中 | **已实测（2026-09-14）** |
 | A12 | `rg.ts` 保持纯逻辑（可离线单测） | `npm test` → 断言 `src/rg.ts` 不含 `child_process`；`execFile(rgPath, args, …)` 第二参必须是 argv 数组（非拼接字符串） | **已实测（2026-09-14）** |
+| A13 | 每次检索落一行自证轨迹（五问可一条命令答） | `npm test` → `tests/trace.test.mjs:离线组合` 真写出两行；线上：`tail -3 $DSH_HOME/code-search-trace.jsonl` 可读 `build/phase/op/query/exitCode/count/durationMs/ok` | **待线上验收**（离线已锁；本批不部署，由派发者统一部署） |
+| A14 | **失败与「无匹配」在轨迹里可辨**（原缺陷的判据面） | `npm test` → `classifyTraceOutcome` 六类样本：成功(`ok=true,count=3`)、无匹配(`exitCode=1` → **`ok=true,count=0`**)、ENOENT(`ok=false`)、SIGKILL(`ok=false`)、结果体内嵌 error、抛错 | **已实测（离线）** |
+| A15 | 观测绝不反噬主流程（IO 失败不抛） | `npm test` → `尸体测试：父路径是普通文件 → 返回 false 且不抛`（断言 `assert.doesNotThrow` + `=== false`） | **已实测** |
+| A16 | **凭据不落盘**（隐私红线，含尸体测试） | `npm test` → `隐私尸体测试`：喂 `sk-live-…`/`ghp_…`/`api_key=hunter2secret`/`Authorization: Bearer <32位>` 四种 pattern → 断言落盘原文里 `includes(secret) === false`，且 `[redacted]` 确实出现（排除「没写进去」的假绿） | **已实测** |
+| A17 | 噪音排除策略在轨迹里可辨（含 include 覆盖） | `npm test` → `describeQueryScope` + `noisePolicyOf`：`strict` / `include-overridden` / `none` 三态；离线组合断言 include 存在时判 `include-overridden`（对应 §10 U4 语义） | **已实测** |
+| A18 | `build` 自报能回答「线上跑哪个构建」 | `npm test` → `buildStamp`：`1.2.3@<mtime>`；读不到版本退化为 `unknown@<mtime>`（不抛） | **已实测** |
 
 ## 8 · 与实现的关系
 
-- 主实现：`self-plugins/dsh-code-search/src/`（`index.ts` 接线与 IO + `rg.ts` 纯逻辑层，无同语义副本）。
+- 主实现：`self-plugins/dsh-code-search/src/`（`index.ts` 接线与 IO + `rg.ts` 纯逻辑层 + `trace.ts` 自证轨迹层（纯函数 + 薄 IO，2026-09-14 新增），无同语义副本）。
 - 未实现/未验证部分**显式标注**：
   - **`enabled` 死配置（已实测）**：字段在 `Config` 中声明、默认 `true`，但 `apply()` 体内**没有任何分支读它**（对比 `dsh-blue-team` 的 `if (config.enabled)` log、`dsh-agent-reflection` 的 `enabled` 门控）。因此 `enabled:false` **不会**关掉工具面——停用只能走组合 `disabled`。
   - **失败口径已统一（2026-09-14 修复）**：`code_search` 与 `code_locate` 现在都在 spawn 失败/非零退出码时暴露 `error`（此前 `code_locate` 静默吞、`code_search` 在 ENOENT 下同样静默——两者同形）。
-  - **单测（2026-09-14 补课已补）**：`tests/rg.test.mjs`（26）+ `tests/shell-contract.test.mjs`（7）= **33/33 全过**；`npm test` 一条命令可复跑。A2–A5 仍需**真实 rg + 真实磁盘**的线上验收（离线单测不能替代），但 argv 拼装、输出解析、退出码归类、注入面已机器锁死。
-  - **无自证侧车**：`ctx.logger` 不落盘 → 「实际 argv / 耗时 / 命中数」事后不可查（§5.22 缺口）。
+  - **单测（2026-09-14 补课已补，批次 S4-A 再加轨迹面）**：`tests/rg.test.mjs`（26）+ `tests/shell-contract.test.mjs`（7）+ `tests/trace.test.mjs`（**18**，批次 S4-A 新增）= **51/51 全过**；`npm test` 一条命令可复跑。A2–A5 仍需**真实 rg + 真实磁盘**的线上验收（离线单测不能替代），但 argv 拼装、输出解析、退出码归类、注入面、**自证轨迹面**已机器锁死。
+  - **自证侧车已补（2026-09-14 批次 S4-A）**：`<DSH_HOME>/code-search-trace.jsonl`（§4.4）。此前 `ctx.logger` 不落盘 ⇒「实际 argv / 耗时 / 命中数 / rg 失败分类」事后不可查（§5.22 缺口）；现在 `tail` 一行即可回答五问。**仍待线上验收**：本批不部署（由派发者统一部署），轨迹行尚未在真实 web 进程里产出。
   - `repository` 字段缺失（`package.json` 无 `repository`），GitHub 归属只能从 README 徽章推断。
 
 ## 9 · 实践修订记录
@@ -186,6 +229,26 @@ dsh-code-search · apply(ctx, config)
   - 语义**被修正**：无（此前无文档）；但实测登记两处实现级缺口——`enabled` 死配置、`code_locate` 静默吞错。
   - 教训（同时回写技能 `semantic-doc-first`）：**同一插件的两个工具可以有不同失败口径**——写语义文档时必须逐工具列失败面，否则「静默空结果」会被当成「真的没有」。
 
+- **2026-09-14 · 批次 S4-A：自证轨迹层（观测层新增，业务行为零变更）**
+  - **语义被补充（新不变量）**：**「执行失败」与「没有结果」不仅要返回值可辨，还要落盘可辨**——
+    轨迹行的 `ok` 与 `exitCode` 必须能在 `exitCode=1` 时区分「rg 缺失」与「真的没匹配」
+    （前者 `ok=false` + `error`，后者 `ok=true, count=0`）。这正是上一轮修复的判据在**证据层**的延伸：
+    返回值只能回答「这一次」，轨迹才能回答「昨晚那次到底是哪种」。
+  - **语义被补充（真实语义）**：`redactQuery` 的两条规则**串联命中**——`Authorization: Bearer abc.def`
+    实测输出 `Authorization=[redacted] [redacted]`（Bearer 规则先擦 token，键值对规则再擦键值），
+    属**过度擦除**（安全方向）。首版单测按「一次擦净」写预期 ⇒ 失败；判定为**我的预期错**，
+    改预期并在测试注释里写明真实语义（技能 C11）。
+  - **语义被确认**：新增 `traced()` 单点收口后，两个工具执行体的业务体**逐字未变**——
+    仅签名多一个观测出口 `meta`（`RgRunMeta`）并由 `runRg` 填充 `exitCode/failure`；
+    正常路径产物、argv 拼装、失败口径全部不变（**行为变更清单：无**）。
+  - **教训**：观测层的「单点收口」不只是省事——本插件有两个执行体，若各改一处，
+    下一个新增工具就会悄悄成为新的观测盲区（半吊子防线，缺陷形状 D1 的同源）。
+- **2026-09-14 · 批次 S4-A：隐私红线（pattern 本身可能是凭据）**
+  - **语义被补充**：`query` 是用户输入的**检索模式**，而排查「这个 key 在哪被硬编码」时
+    用户会直接把 key 当模式搜 ⇒ **检索轨迹天然是凭据泄露面**。故 `redactQuery` 在落盘前按形状擦除
+    （键值对 / `sk-`·`ghp_`·`github_pat_`·`AKIA` 前缀 / `Bearer` / ≥32 位高熵串），
+    并配**隐私尸体测试**（断言原文搜不到凭据串，且 `[redacted]` 确实出现）。
+
 ## 10 · 未决问题
 
 - **U1 `code_locate` 静默吞错（✅ 已闭环 2026-09-14）**：原倾向「改为返回 `{count:0, files:[], error:<stderr 前 500>}`，
@@ -200,3 +263,24 @@ dsh-code-search · apply(ctx, config)
 - **U5 `maxResults` 负数语义两工具不对称（2026-09-14 补课实测登记）**：`code_search` 的 `cap<0` → 空结果；
   `code_locate` 的 `cap<0` → `slice(0,-n)` **从尾部丢弃**（不是空）。倾向：统一为「负数视为 0，返回空」
   （保守：不返回任何结果比返回一个被静默截尾的列表更可解释）。需裁决。
+- **U6 `redactQuery` 的擦除阈值可能过度（2026-09-14 批次 S4-A 登记）**：第 5 条规则
+  `[A-Za-z0-9+/=_-]{32,}` 会把任何 ≥32 位连续此类字符的快照擦成 `[redacted]`——
+  长路径片段（如 `alice/self-plugins/dsh-code-search`）、长标识符也会中招，导致 `query` 字段
+  对「复现一次检索」的用途打折。**只登记不改**：隐私红线的方向是**宁可过度**，
+  且 Q3（断在哪一段）由 `exitCode`/`ok`/`error` 承担，不依赖 `query`。倾向：
+  若后续实测发现 Q2 复现能力受损，改为「保留首尾各 4 字符 + 中间擦除」的**部分可辨**策略。
+- **U7 轨迹文件无轮转（2026-09-14 批次 S4-A 登记）**：`code-search-trace.jsonl` 为纯追加，
+  无 `keepLines` 上界——本插件调用频率高（补课任务单轮可达数十次），长期可能膨胀。
+  倾向：参考 `dsh-plugin-bootreport` 的「有界裁剪（`keepLines + 50`）」加一个上限，
+  且断言写「有界」而非「恰好等于」。需裁决是否本轮补。
+
+## 附 · 快速取证命令
+
+```bash
+# Q1–Q5 一条命令（最近三次检索）
+tail -3 "$DSH_HOME/code-search-trace.jsonl"
+# 只看失败笔次（Q3 断点分类）
+grep '"ok":false' "$DSH_HOME/code-search-trace.jsonl" | tail -5
+# 只看噪音排除被 include 覆盖的笔次（U4 的真实影响面）
+grep '"noisePolicy":"include-overridden"' "$DSH_HOME/code-search-trace.jsonl" | tail -5
+```
