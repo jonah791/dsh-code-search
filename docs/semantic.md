@@ -1,18 +1,18 @@
 # 语义文档：dsh-code-search（本地大仓检索面）
 
-> 版本 v0.3 · 2026-09-20（初版 2026-09-14）· 作者：爱丽丝 · 状态：**implemented**
+> 版本 v0.4 · 2026-09-20（初版 2026-09-14）· 作者：爱丽丝 · 状态：**implemented**
 > 开发方式：语义文档优先（先写清「是什么/什么关系/怎么裁决」，再让实现逼近，最后用实践回修）
-> 实现落点：`self-plugins/dsh-code-search/src/`（`index.ts` 接线与 IO + `rg.ts` 纯逻辑 + `trace.ts` 自证轨迹 + `symbols.ts` 符号识别 + `graph.ts` 引用图层；构建产物 `lib/`）
+> 实现落点：`self-plugins/dsh-code-search/src/`（`index.ts` 接线与 IO + `rg.ts` 纯逻辑 + `trace.ts` 自证轨迹 + `symbols.ts` 符号识别 + `graph.ts` 引用图层 + `gate.ts` 测试闸门层；构建产物 `lib/`）
 
 | 项 | 值 |
 |----|----|
 | 能力名 | dsh-code-search（插件内 `name = 'agent-code-search'`） |
 | 主副本路径 | `self-plugins/dsh-code-search/docs/semantic.md` |
-| 实现落点 | `self-plugins/dsh-code-search/src/`（5 个源文件） |
-| 版本 | `package.json` = 0.3.0 |
+| 实现落点 | `self-plugins/dsh-code-search/src/`（6 个源文件） |
+| 版本 | `package.json` = 0.4.0 |
 | 组合行 | `E:\alice\.dsh\profiles\web\cordis.patch.yml`，`id: agent-code-search`，**无 config**（走全默认） |
-| 状态 | **implemented**（v0.3 已部署并线上实测；v0.2 的「3 工具」契约已被本版取代） |
-| 修订摘要 | v0.3（2026-09-20）：新增 `code_impact`（引用面/影响分析）——**导入归属 + 导出链可达性**的文件级精确反向引用图，零新增依赖；v0.2（2026-09-20）：新增 `code_symbols`、`code_search` 诚实计数；v0.1：`code_search` + `code_locate` |
+| 状态 | **implemented**（v0.4 已部署并线上实测；v0.3 的「4 工具」契约已被本版取代） |
+| 修订摘要 | v0.4（2026-09-20）：新增 `code_test_gate`（测试闸门：git 改动 → 反向可达 → 该跑的命令）+ `lib-map` 源码↔产物约定映射；v0.3：`code_impact` 引用面；v0.2：`code_symbols` + 诚实计数；v0.1：`code_search` + `code_locate` |
 
 ---
 
@@ -99,7 +99,7 @@ dsh-code-search · apply(ctx, config)
 | `rgPath` | string | `''` | 空 → 用 `'rg'` 走 PATH |
 | `noiseExcludes` | string[] | `['!**/node_modules/**','!**/.pnpm/**','!**/dist/**','!**/build/**','!**/coverage/**','!**/.git/**','!**/lib/**','!**/.dsh/**','!**/_tmp_review/**']` | 负向 glob（注意含 **`lib`**——构建产物默认不被检索） |
 
-### 4.2 工具契约（4 个）
+### 4.2 工具契约（5 个）
 
 | 工具 | 入参 | 出参 schema | cap |
 |------|------|-------------|-----|
@@ -107,6 +107,7 @@ dsh-code-search · apply(ctx, config)
 | `code_locate` | `term`(必填)、`path?`、`include?`、`maxResults?` | `{count, files:[string]}`；render `共 N 个文件`（截断时 `共 N 个文件（显示 M）`）+ 文件清单 | 30 |
 | `code_symbols` | `path?`、`include?`、`exclude?`、`maxFiles?`、`maxSymbols?` | `{count, files, total, truncated, mode, symbols:[{path,kind,name,lineNo,sig}], error?}`；render `符号地图（mode=regex 正则近似，非 AST）：扫描 F 文件 / S 符号（已截断?）` + 按文件分组 `kind name (L行号)` | 文件 40 / 符号 300 |
 | `code_impact` | `symbol`(必填)、`path?`、`include?`、`exclude?`、`maxFiles?`、`maxResults?` | `{count, exact, unverifiedCount, scanned, files, truncated, mode, defs:[{path,lineNo}], refs:[{path,how,via?}], unverified:[{path,lines}], error?}`；render `引用面（mode=import-graph：导入归属 + 导出链可达性）：扫描 N 文件 \| 精确引用 M \| 未证实 K`，随后定义点清单（**为空时披露三种成因**，见下）+ 每个引用者一行 `[how] path ← '模块说明符'` | 文件 4000 / 每档 30 |
+| `code_test_gate` | `path?`、`since?`、`include?`、`exclude?`、`maxFiles?`、`maxResults?` | `{count, changed, affected, tests, mode, truncated, packages:[{dir,command,files}], testFiles:[string], unmapped:[string], unexpanded:[string], error?}`；render `测试闸门（…）：改动 C 文件 → 受影响 A → 该跑 T 个测试` + 每个测试包一条 `> 命令`（读该包 `package.json` 的 `scripts.test`）+ 受影响的测试文件 + **未映射（诚实的空白）** + **未展开的未追踪目录** | 反向可达 5000 节点 / 每档 40 |
 
 **`code_impact` 的诚实分级词汇表（`how` 字段，闭集）**——这是本工具的核心纪律：每条边都要说清「我凭什么认为它引用了」：
 
@@ -241,6 +242,10 @@ dsh-code-search · apply(ctx, config)
 | A27 | 同名符号靠**导入归属**消歧（尸体测试：名字匹配式实现在此会混淆） | `npm test` → `尸体测试：同名符号靠导入归属消歧`：两个包各有 `handle()`，`use1` 只能归 `p1`、`use2` 只能归 `p2`，`unverified` 为 0 | **已实测（单测）** |
 | A28 | **再导出者本身也是引用者**（原实现漏算，修正有前后对照） | 修正后线上读数（同 A25 参数）：精确 **47**、未证实 **11**；修正前（探测脚本版）为 45 / 12——差的那一笔正是 `core/tools/src/index.ts` 的 `defineTool,` re-export 行 | **已实测（2026-09-20 前后对照）** |
 | A29 | 定义点为 0 时**披露成因**（静默归零不再无声） | render 分支：`defs.length === 0` → 输出「可能是①符号名不符 ②被 maxFiles 截断 ③由 re-export/动态方式引入」；`npm test` 覆盖空图退化（零结果不抛） | **已实测（2026-09-20，源码分支 + 单测）** |
+| A30 | `code_test_gate` 在工具面，一次调用给出「改动 → 受影响 → 测试 → **命令**」全链 | 线上调用 `code_test_gate{path:'…\\dsh-code-search', since:'HEAD~1'}` → `改动 11 文件 → 受影响 14 → 该跑 5 个测试` + 命令 `node --test "tests/*.test.mjs"`（读自该包 `scripts.test`） | **已实测（2026-09-20 线上）** |
+| A31 | 源码↔产物约定映射（`lib-map`）补上「源码 → 测试」的断边 | 修复前后**同参数对照**：受影响 12→**14**、测试 3→**5**、未映射 8→**4**；单测另钉住「直接命中优先于映射」（同一路径在两种情况分别返回 `rel` / `lib-map`） | **已实测（2026-09-20 前后对照 + 单测）** |
+| A32 | `unmapped` 的语义是「**这一条改动**没有测试盯着它」（不是「不在图里」） | `npm test` → `testGate：噪音过滤 / 未追踪目录分离 / 删除文件不参与 / 无测试时披露 unmapped`：只有 `src/a.ts` 无测试时它单独进 `unmapped` | **已实测（单测）** |
+| A33 | 闸门层**不依赖运行平台**（分隔符统一规范化） | `packageRootOf` 用 Windows 形态输入匹配 posix 包目录；`testGate` 用 `/` 风格图键配相对路径改动；`npm test` 在 **Windows 侧与 WSL 侧**各跑一次均 **93/93 绿** | **已实测（双平台）** |
 
 ## 8 · 与实现的关系
 
@@ -253,6 +258,39 @@ dsh-code-search · apply(ctx, config)
   - `repository` 字段缺失（`package.json` 无 `repository`），GitHub 归属只能从 README 徽章推断。
 
 ## 9 · 实践修订记录
+
+- **2026-09-20 · v0.4：测试闸门——把「会波及谁」接成「该跑什么」** —— 主人指令「继续」（接 v0.3 的下一步）
+  - **动机**：v0.3 的 `code_impact` 回答「改**这个符号**波及谁」，但真实改动是**一批文件**，人要的是「该跑哪些测试」。
+    v0.4 接上这一环：git 改动集 → 引用图**反向可达** → 其中的测试 → **可直接执行的命令**（读各包 `scripts.test`）。
+    与 ripwire 的 `--test-gate` 同一意图，差别是本工具把**执行**也给了（命令而非仅清单）。
+  - **探测先行（不猜 git 的输出形态）**：实测三件事——① porcelain 是 `XY PATH`，rename 形如 `XY ORIG -> PATH`（取**新**路径）；
+    ② **未追踪目录只给目录名且带尾斜杠**（`?? .alice-identity-profile-2/`），内部文件拿不到 ⇒ 一律计入 `unexpanded`
+    如实披露，而不是当作「没有改动」；③ **主仓把 `self-plugins/*` 当 gitlink**（` M self-plugins/dsh-agent-browser`），
+    子仓内部的文件级改动在主仓视角不可见 ⇒ 闸门必须**对目标仓分别调用**（本版不递归子仓，写进 §5 边界）。
+  - **线上实测抓到的真缺口（本轮最有价值的产物）**：首次线上调用时，闸门把 `src/graph.ts`、`src/index.ts` 等
+    **明显有测试覆盖**的源文件报成「未映射到任何测试」。根因：**测试 import 的是编译产物**（`../lib/symbols.js`），
+    而 `lib/` 在默认噪音排除内 ⇒ 图里没有 `lib/` 节点 ⇒ 「源码 → 测试」的边**断在产物目录**。
+    处置：新增 `libMappedPaths`（把 `/lib/` 段换成 `/src/` 的**目录约定映射**，标 `how: 'lib-map'` 与直接命中区分），
+    顺序上「真实存在的文件优先于映射推断」。**修复前后对照**：受影响 12→**14**、测试 3→**5**、未映射 8→**4**。
+  - **语义被修正（实现与文档不符，由单测暴露）**：`unmapped` 文档写的是「改动**没有测试覆盖**」，
+    实现却是「改动不在图里」——两者不同。改为**按改动逐个算反向可达**再检查其中有无测试：
+    这才能回答「A 有测试、B 没有」，而不是把两者混成「这批改动整体有没有测试」。
+    同时 `changed` 曾漏掉图里没有的改动（只返回匹配上的），一并修正为返回全部过滤后的改动。
+  - **语义被补充（分层枚举去重）**：`traced()` 的阶段联合类型与 `describeQueryScope` 的 op 联合类型**各自复制了一份**——
+    新增阶段要改两处（本次就是）。改为 `Exclude<CodeSearchTracePhase, 'boot'>` **从单一枚举派生**。
+  - **平台无关（夹具纪律）**：`testGate` 与 `packageRootOf` 原本硬编码 `\` 分隔符，在 WSL 下会**静默匹配不上**；
+    改为统一规范化后比较。`libMappedPaths` 另补一层：原路径是反斜杠风格时同时给出两种形态——
+    **`fileExists` 的契约不应要求调用方把同一文件登记两种分隔符**（插件里两种都登记了，那是实现细节）。
+  - **两处工程卫生**：① 建图逻辑从 `buildImpact` 内联抽成 `buildGraph`（`code_test_gate` 需要**同一张图**，
+    两份必然漂移）；② **注释里的 glob 会提前闭合块注释**——在 TS 块注释内写 glob 原文（`**` 紧跟 `/`）会让
+    `*/` 提前收尾，tsc 报 `Cannot find name 'node_modules'`（本次真踩，已在该处留注）。
+  - **实测读数**（插件自身仓，`since=HEAD~1`）：改动 11 文件 → 受影响 **14** → 该跑 **5** 个测试 → 命令
+    `node --test "tests/*.test.mjs"`；未映射 **4** 项（`README.md` / `docs/semantic.md` / `package.json` / `src/index.ts`）——
+    **这 4 项是真实的**：前三个确实无测试；`src/index.ts` 是入口接线层，测试 import 的是纯逻辑模块，
+    入口只被 `shell-contract` **读源码**而非 import，图看不到这条边（闸门的措辞已覆盖「或图里没有它们」）。
+  - **可测试性**：`src/gate.ts` 全纯函数（git 输出与文件存在性都由调用方注入）⇒ 不碰磁盘、不调 git、双平台可跑；
+    `tests/gate.test.mjs` **13 条**（porcelain 五态 / 噪音过滤 / 未展开目录 / 测试识别正反例 / 反向可达含环与触顶 /
+    最长前缀包归属 / 命令退化 / 闸门整合 / 退化不抛）。
 
 - **2026-09-20 · v0.3：从「借鉴 ripwire」到「在单一维度上超越」——`code_impact` 引用图层** —— 主人指令「超越ripwire」
   - **动机与定位**：v0.2 只借鉴了两条**思路**（先给地图、诚实计数），而 ripwire 的**核心能力**是调用图与影响面

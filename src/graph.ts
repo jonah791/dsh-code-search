@@ -32,8 +32,9 @@ import { dirname, join, resolve } from 'node:path'
 /** 源文件扩展名集合（解析候选与扫描口径共用）。 */
 export const SOURCE_EXTS = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'] as const
 
-/** 路径解析的结果分类（**诚实词汇表**：读者能看见这一条怎么来的）。 */
-export type ResolveHow = 'rel' | 'pkg-entry' | 'pkg-sub' | 'unresolved-pkg' | 'unresolved'
+/** 路径解析的结果分类（**诚实词汇表**：读者能看见这一条怎么来的）。
+ *  `lib-map` = 经**源码↔产物约定映射**命中（`lib/x.js` → `src/x.ts`），见 `libMappedPaths`。 */
+export type ResolveHow = 'rel' | 'pkg-entry' | 'pkg-sub' | 'lib-map' | 'unresolved-pkg' | 'unresolved'
 
 /** 一条 import 语句的原始形态。 */
 export interface RawImport {
@@ -168,6 +169,31 @@ export function candidatePaths(basePath: string): string[] {
   return cands
 }
 
+/**
+ * **源码↔产物约定映射**候选：把路径里的 `/lib/` 段换成 `/src/` 再生成候选。
+ *
+ * 为什么需要（2026-09-20 线上实测抓到的真实缺口）：TS 工程里**测试 import 的是编译产物**
+ * （`import … from '../lib/symbols.js'`），而产物目录在默认噪音排除内
+ * ⇒ 图里根本没有 `lib/` 节点 ⇒ 「源码 → 测试」的边**断在产物目录**，
+ * 表现是「改了 `src/graph.ts`，测试闸门却说没有测试盯着它」——**一句静默的假话**。
+ *
+ * 定位：这是**目录约定的确定性映射**（tsc 的 `rootDir: src` / `outDir: lib`），不是名字猜测，
+ * 故单独标 `lib-map` 让读者能区分；没有对应 `src/` 候选时照旧返回空数组。
+ */
+export function libMappedPaths(basePath: string): string[] {
+  const p = basePath.replace(/\\/g, '/')
+  const at = p.lastIndexOf('/lib/')
+  if (at < 0) return []
+  const alt = p.slice(0, at) + '/src/' + p.slice(at + '/lib/'.length)
+  const out = candidatePaths(alt)
+  // 原路径是反斜杠风格时，**同时给出反斜杠形态**：`fileExists` 的契约不应要求调用方
+  // 把同一文件登记两种分隔符（插件里两种都登记了，但那是调用方的实现细节，不是本函数的约定）。
+  if (basePath.includes('\\')) {
+    for (const c of [...out]) out.push(c.replace(/\//g, '\\'))
+  }
+  return out
+}
+
 /** 模块说明符 → 包名（`@scope/pkg/sub/x` → `@scope/pkg`；`pkg/x` → `pkg`）。 */
 export function packageNameOf(source: string): string {
   const parts = source.split('/')
@@ -187,7 +213,12 @@ export function resolveModule(
 ): { path: string | null; how: ResolveHow } {
   if (source.startsWith('.')) {
     const base = resolve(dirname(fromFile), source)
-    return { path: candidatePaths(base).find(fileExists) ?? null, how: 'rel' }
+    const direct = candidatePaths(base).find(fileExists)
+    if (direct !== undefined) return { path: direct, how: 'rel' }
+    // 直接命中失败才退回约定映射——**顺序即优先级**：真实存在的文件优先于映射推断
+    const viaLib = libMappedPaths(base).find(fileExists)
+    if (viaLib !== undefined) return { path: viaLib, how: 'lib-map' }
+    return { path: null, how: 'rel' }
   }
   const pkgName = packageNameOf(source)
   const pkgDir = pkgDirs.get(pkgName)

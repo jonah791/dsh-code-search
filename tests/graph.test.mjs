@@ -10,7 +10,7 @@ import assert from 'node:assert/strict'
 import { resolve } from 'node:path'
 import {
   candidatePaths, findDefiner, impactOf, mentionsSymbol, namesInClause,
-  packageNameOf, parseImports, parseReexports, resolveModule,
+  libMappedPaths, packageNameOf, parseImports, parseReexports, resolveModule,
 } from '../lib/graph.js'
 
 test('namesInClause：具名 / 别名 / type 前缀 / default / namespace', () => {
@@ -81,6 +81,25 @@ test('resolveModule：相对 / 包入口 / 包子路径 / 未映射包（四态�
   assert.deepEqual(resolveModule(from, 'kk', exists, dirs), { path: resolve('/pkg/src/index.ts'), how: 'pkg-entry' })
   assert.deepEqual(resolveModule(from, 'kk/src/sub/deep', exists, dirs), { path: resolve('/pkg/src/sub/deep.ts'), how: 'pkg-sub' })
   assert.deepEqual(resolveModule(from, 'nope', exists, dirs), { path: null, how: 'unresolved-pkg' })
+})
+
+test('libMappedPaths + resolveModule：产物→源码约定映射（测试 import 编译产物的通用结构）', () => {
+  const from = resolve('/p/tests/x.test.mjs')
+  // 产物路径在磁盘上不存在（lib/ 在默认噪音排除内），但按目录约定映射到 src/
+  const srcOnly = new Set([resolve('/p/src/rg.ts'), resolve('/p/src/index.ts')])
+  assert.deepEqual(
+    resolveModule(from, '../lib/rg.js', (p) => srcOnly.has(p), new Map()),
+    { path: resolve('/p/src/rg.ts'), how: 'lib-map' },
+  )
+  // **顺序即优先级**：真实存在的产物优先于映射推断
+  const both = new Set([resolve('/p/lib/rg.js'), resolve('/p/src/rg.ts')])
+  assert.deepEqual(
+    resolveModule(from, '../lib/rg.js', (p) => both.has(p), new Map()),
+    { path: resolve('/p/lib/rg.js'), how: 'rel' },
+  )
+  // 没有 /lib/ 段 → 不产生任何映射候选
+  assert.deepEqual(libMappedPaths('/p/src/x.js'), [])
+  assert.deepEqual(libMappedPaths('/p/lib/x.js'), candidatePaths('/p/src/x.js'))
 })
 
 test('findDefiner：沿 re-export 链可达 / `export *` 传播 / 环安全 / 不可达', () => {

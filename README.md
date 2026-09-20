@@ -1,23 +1,23 @@
 <!--
   DSH 插件生态公约声明（plugin-ecosystem-convention · 组合优先/声明清晰/兼容优先）
-  purpose: 本地代码/文件智能检索：封装系统 rg（ripgrep），默认排除 node_modules/.pnpm/dist/build/coverage/.git/lib/.dsh 等 9 条噪音目录；四个视角——code_search（文本：全文检索，rg --json 结构化防 Windows 盘符坑）+ code_locate（文件：--files-with-matches 定位）+ code_symbols（结构：符号地图）+ code_impact（关系：引用面/影响分析，导入归属 + 导出链可达性，零依赖的文件级精确反向引用图）；每次调用落一行自证轨迹
+  purpose: 本地代码/文件智能检索：封装系统 rg（ripgrep），默认排除 node_modules/.pnpm/dist/build/coverage/.git/lib/.dsh 等 9 条噪音目录；五个视角——code_search（文本：全文检索，rg --json 结构化防 Windows 盘符坑）+ code_locate（文件：--files-with-matches 定位）+ code_symbols（结构：符号地图）+ code_impact（关系：引用面/影响分析，导入归属 + 导出链可达性）+ code_test_gate（行动：测试闸门，git 改动 → 反向可达 → 该跑的命令）；每次调用落一行自证轨迹
   inject: 'tools'
-  tools: code_search,code_locate,code_symbols,code_impact
+  tools: code_search,code_locate,code_symbols,code_impact,code_test_gate
   runtime: host-only
-  envDeps: 系统 rg（ripgrep 可执行文件，rgPath 为空时走 PATH；无 rg 则工具显式报错而非静默空结果）
-  boundary: pattern 是正则（极端模式可拖住 rg 的 ReDoS 类风险）；lib/ 默认排除——「找不到」有时是排除规则的功劳而非事实；code_impact 只认 ESM 显式导入（动态 import()/require() 认不得），粒度是**文件**不是调用点；纯只读（不写文件/不建索引/不联网）
+  envDeps: 系统 rg（ripgrep 可执行文件，rgPath 为空时走 PATH；无 rg 则工具显式报错而非静默空结果）；code_test_gate 另需 git 在 PATH
+  boundary: pattern 是正则（极端模式可拖住 rg 的 ReDoS 类风险）；lib/ 默认排除——「找不到」有时是排除规则的功劳而非事实；code_impact 只认 ESM 显式导入（动态 import()/require() 认不得），粒度是**文件**不是调用点；code_test_gate 的 git 只看**它所在那个仓**（子仓内部改动在主仓视角是 gitlink，看不到），未追踪目录不展开；纯只读（不写文件/不建索引/不联网）
   compat: cordis ^4.0.1 / schemastery ^3.18.1-rc.1 / dsh-tools ^0.1.0-rc.6
 -->
 # dsh-code-search
 
 <p align="center">
-  <a href="https://github.com/jonah791/dsh-code-search"><img src="https://img.shields.io/badge/version-0.3.0-blue" alt="version"></a>
+  <a href="https://github.com/jonah791/dsh-code-search"><img src="https://img.shields.io/badge/version-0.4.0-blue" alt="version"></a>
   <img src="https://img.shields.io/badge/License-MIT-green" alt="license">
   <img src="https://img.shields.io/badge/TypeScript-3178C6" alt="TypeScript">
-  <img src="https://img.shields.io/badge/tests-80%20passed-brightgreen" alt="tests">
+  <img src="https://img.shields.io/badge/tests-93%20passed-brightgreen" alt="tests">
 </p>
 
-**一句话**：给 agent 一个「懂大仓」的检索面——封装**系统 ripgrep**，按**四个视角**回答关于代码的问题：`code_search`（**文本**：谁包含这段字）+ `code_locate`（**文件**：X 在哪个文件）+ `code_symbols`（**结构**：这个目录定义了哪些符号）+ `code_impact`（**关系**：改这个符号会波及谁）。
+**一句话**：给 agent 一个「懂大仓」的检索面——封装**系统 ripgrep**，按**五个视角**回答关于代码的问题：`code_search`（**文本**：谁包含这段字）+ `code_locate`（**文件**：X 在哪个文件）+ `code_symbols`（**结构**：这个目录定义了哪些符号）+ `code_impact`（**关系**：改这个符号会波及谁）+ `code_test_gate`（**行动**：这批改动该跑什么）。
 
 **为什么值得用**：通用 `grep` 搜大仓的痛点是噪音（`node_modules` 里成千上万假命中）与 Windows 盘符解析坑。本插件零新依赖复用系统 rg 内核，`--json` 结构化输出规避盘符坑；并且**拒绝一切静默失效**——「rg 不存在」显式报错而不是伪装成「0 匹配」，「共 N 匹配」给的是**真实总数**而非截断值，「谁引用了它」按**来源分级**而不是靠名字猜。
 
@@ -29,6 +29,25 @@
 | `code_locate` | 文件 | 按概念/符号定位文件（rg `--files-with-matches` 语义）：排除噪音后返回文件清单（上限 30） |
 | `code_symbols` | 结构 | **符号地图**（v0.2）：列出目录/glob 下定义了哪些 `function`/`class`/`interface`/`type`/`const`/方法及其行号，按文件分组——先看结构再决定读哪个文件。逐行正则近似（`mode=regex`），支持 TS/JS、Python、Rust、Go、Markdown 标题 |
 | `code_impact` | **关系** | **引用面/影响分析**（v0.3）：给定符号名 → **定义点**（带行号）+ **精确引用者**（能沿 import / 包名 / re-export 链追到定义文件）+ **未证实提及**（正文出现但无导入关系可证）。回答「改它会波及谁」 |
+| `code_test_gate` | **行动** | **测试闸门**（v0.4）：读 git 改动集 → 沿引用图**反向可达**（谁依赖这些改动）→ 挑出其中的测试 → 按包归组并给出**可直接执行的测试命令**。回答「这批改动该跑什么」 |
+
+## 测试闸门（v0.4）——从「会波及谁」到「该跑什么」
+
+`code_impact` 的输入是**一个符号**，而真实改动是**一批文件**；闸门把这一步接成闭环：
+
+```text
+git 改动集 → 反向可达（谁依赖它们）→ 其中的测试 → 按包读 scripts.test → 可直接执行的命令
+```
+
+**它诚实的三种「空白」**（都不会被静默吞掉）：
+
+| 情形 | 输出 | 为什么这样处理 |
+|------|------|--------------|
+| 改动**没有测试盯着它** | 计入 `unmapped` | 这是最有价值的信号而非错误——它在说「你改了这个，但没有测试覆盖它」 |
+| 未追踪**目录**（`?? dir/`） | 计入 `unexpanded` | git 只给目录名，内部文件拿不到 ⇒ 不假装分析过 |
+| 子仓内部改动（主仓视角） | 需**对目标仓分别调用** | 主仓把 `self-plugins/*` 当 gitlink，看不到子仓内部文件 |
+
+**`lib-map`：一条容易被忽略的断边。** TS 工程里测试通常 import **编译产物**（`../lib/symbols.js`），而 `lib/` 在默认噪音排除内 ⇒ 图里没有 `lib/` 节点 ⇒ 「源码 → 测试」的边**断在产物目录**，表现为「改了源码，闸门却说没有测试盯着它」。处置是按目录约定把 `/lib/` 映回 `/src/`（标 `how: 'lib-map'` 与直接命中区分，**真实存在的文件优先于映射推断**）。修复前后同参数对照：受影响 **12→14**、测试 **3→5**、未映射 **8→4**。
 
 ## 引用面（v0.3）——为什么它比名字匹配准
 
@@ -135,12 +154,13 @@ tail -3 "$DSH_HOME/code-search-trace.jsonl"
 npm test        # = node --test "tests/*.test.mjs"
 ```
 
-**80 例离线测试**（`rg.test.mjs` 26 + `shell-contract.test.mjs` 7 + `trace.test.mjs` 18 + `symbols.test.mjs` 18 + `graph.test.mjs` **11**），全部不依赖网络与真实磁盘（纯函数 + 桩）。覆盖：
+**93 例离线测试**（`rg.test.mjs` 26 + `shell-contract.test.mjs` 7 + `trace.test.mjs` 18 + `symbols.test.mjs` 18 + `graph.test.mjs` 12 + `gate.test.mjs` 12），全部不依赖网络与真实磁盘（纯函数 + 桩），**Windows 与 WSL 双平台各跑一次均全绿**。覆盖：
 - `rg.test.mjs` — rg 纯逻辑：argv 拼装（空模式/空 include/cap 边界）、`--json` 行解析（损坏行/缺字段）、**`classifyRgOutcome` 六类失败样本**（ENOENT/EACCES/EPERM/EISDIR/SIGTERM/无 code）；
 - `shell-contract.test.mjs` — **注入面守卫**：扫描 `src/*.ts` 无 shell 执行形态（带尸体样本证明扫描器会命中）、`rg.ts` 保持纯净（无 `child_process`）、`execFile` 第二参必须是 argv 数组；
 - `trace.test.mjs` — 轨迹层：`classifyTraceOutcome` 六类样本、**隐私尸体测试**（凭据形状落盘前必被擦除）、观测不反噬（不可写路径 → `false` 且不抛）、`buildStamp` 退化路径；
 - `symbols.test.mjs` — 符号识别：TS/JS+Python/Rust/Go/MD 形态、注释行不认、**形态约束压误报**（局部 `const` 与缩进方法调用不收）、触顶如实标注；
-- `graph.test.mjs` — **引用图层**：子句解析（含 `type`/别名/`export * as`）、`resolveModule` 四态（rel/pkg-entry/pkg-sub/unresolved）、`findDefiner` 沿链可达与**环安全**、`impactOf` 四档归类不重复计数、**同名消歧尸体测试**。
+- `graph.test.mjs` — **引用图层**：子句解析（含 `type`/别名/`export * as`）、`resolveModule` 四态（rel/pkg-entry/pkg-sub/unresolved）、`findDefiner` 沿链可达与**环安全**、`impactOf` 四档归类不重复计数、**同名消歧尸体测试**，以及 **`lib-map` 产物→源码约定映射**（含「直接命中优先于映射」的顺序判据）。
+- `gate.test.mjs` — **测试闸门层**：porcelain 五态解析（rename 取**新**路径、未追踪目录保留尾斜杠）、噪音过滤、未展开目录分离、测试识别正反例、反向可达含**环安全与触顶披露**、最长前缀包归属、命令挑选退化、闸门整合、空输入不抛；含**跨平台分隔符**样本。
 
 ## 设计要点
 
@@ -151,13 +171,14 @@ npm test        # = node --test "tests/*.test.mjs"
 - **rg --json 而非文本解析（Windows 盘符坑）**：结构化输出才是安全的解析入口。
 - **include 排在 excludes 之后**：rg「后置 glob 覆盖前置」⇒ `include='*.ts'` 会重新纳入 `node_modules/**/*.ts`——既定语义，轨迹的 `noisePolicy` 会标 `include-overridden`。
 - **零新依赖**：复用系统 rg（零常驻服务、零索引、每次现扫）；引用图也不用编译器——`graph.ts` 是纯函数（文件存在性由调用方注入）。
-- **观测单点收口**：四个工具执行体都经 `traced()` 落笔——新增工具若绕开它，就悄悄制造新的观测盲区。
+- **观测单点收口**：五个工具执行体都经 `traced()` 落笔——新增工具若绕开它，就悄悄制造新的观测盲区。
+- **闸门给命令、不给清单**：`code_test_gate` 读各包 `package.json` 的 `scripts.test` 直接产出可执行命令——「该跑什么」比「影响了哪些文件」更接近行动；读不到就留空，**不编造**。
 
 ## 相关文档
 
 | 文档 | 内容 |
 |------|------|
-| [`docs/semantic.md`](docs/semantic.md) | **权威契约**：定位与反定位（含与 ripwire 的能力对照表）、工具/轨迹契约、诚实分级词汇表、失败面（逐工具）、可证伪验收清单（A1–A29）、实践修订记录、未决问题（U1–U7） |
+| [`docs/semantic.md`](docs/semantic.md) | **权威契约**：定位与反定位（含与 ripwire 的能力对照表）、工具/轨迹契约、诚实分级词汇表、失败面（逐工具）、可证伪验收清单（A1–A33）、实践修订记录、未决问题（U1–U7） |
 | [alice-digital-life](https://github.com/jonah791/alice-digital-life) | 本插件所属生态的中心索引（全部自研插件） |
 | 技能 `rg-wrapper-tool-development` | 本插件的开发方法论沉淀（Windows 盘符坑 / `rg --json` / 噪音排除设计），改本插件前先读它 |
 | 技能 `plugin-maintainability` | 插件可维护性工程（自证轨迹 / 失败与无匹配分离 / 观测不反噬） |

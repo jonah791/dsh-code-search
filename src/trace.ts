@@ -25,8 +25,8 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
 /** 阶段枚举：一次进程从 boot 起，每次检索一行（`symbols` = code_symbols 的符号地图，
- *  `impact` = code_impact 的引用面查询）。 */
-export type CodeSearchTracePhase = 'boot' | 'search' | 'locate' | 'symbols' | 'impact'
+ *  `impact` = code_impact 的引用面查询，`test-gate` = code_test_gate 的测试闸门）。 */
+export type CodeSearchTracePhase = 'boot' | 'search' | 'locate' | 'symbols' | 'impact' | 'test-gate'
 
 /** 噪音排除策略（Q4：排除真的生效了吗，还是被 include 覆盖重新纳入）。 */
 export type NoisePolicy = 'strict' | 'include-overridden' | 'none'
@@ -83,11 +83,13 @@ export interface TraceArgs {
   term?: string
   /** `code_impact` 的符号名（与 pattern/term 同属「查询输入侧」，用于轨迹 Q2 复现）。 */
   symbol?: string
+  /** `code_test_gate` 的 git 基准（同上，属输入侧）。 */
+  since?: string
   path?: string
   include?: string
   exclude?: string
   maxResults?: number
-  /** `code_symbols` / `code_impact` 的文件上限。 */
+  /** `code_symbols` / `code_impact` / `code_test_gate` 的文件上限。 */
   maxFiles?: number
 }
 
@@ -181,7 +183,7 @@ export function noisePolicyOf(noiseGlobs: number, includeOverride: boolean): Noi
 
 /** 参数摘要（纯函数）：根路径回落 / include / exclude / 噪音条数 / 策略 / 上限缺省值。
  *  各工具缺省上限：`code_search`=50 条匹配、`code_locate`=30 个文件、`code_symbols`=40 个文件。 */
-export function describeQueryScope(args: TraceArgs, cfg: TraceConfig, op: 'search' | 'locate' | 'symbols' | 'impact'): QueryScope {
+export function describeQueryScope(args: TraceArgs, cfg: TraceConfig, op: Exclude<CodeSearchTracePhase, 'boot'>): QueryScope {
   const include = args.include ?? ''
   const noiseGlobs = cfg.noiseExcludes.length
   return {
@@ -191,7 +193,8 @@ export function describeQueryScope(args: TraceArgs, cfg: TraceConfig, op: 'searc
     exclude: op === 'locate' ? '' : args.exclude ?? '',
     noiseGlobs,
     noisePolicy: noisePolicyOf(noiseGlobs, include !== ''),
-    maxResults: op === 'symbols' || op === 'impact'
+    // 建图类工具（symbols / impact / test-gate）的预算是**文件数**，不是结果条数
+    maxResults: op === 'symbols' || op === 'impact' || op === 'test-gate'
       ? args.maxFiles ?? (op === 'symbols' ? 40 : 4000)
       : args.maxResults ?? (op === 'search' ? 50 : 30),
   }
