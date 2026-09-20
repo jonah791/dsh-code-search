@@ -24,8 +24,9 @@ import { appendFileSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
-/** 阶段枚举：一次进程从 boot 起，每次检索一行。 */
-export type CodeSearchTracePhase = 'boot' | 'search' | 'locate'
+/** 阶段枚举：一次进程从 boot 起，每次检索一行（`symbols` = code_symbols 的符号地图，
+ *  `impact` = code_impact 的引用面查询）。 */
+export type CodeSearchTracePhase = 'boot' | 'search' | 'locate' | 'symbols' | 'impact'
 
 /** 噪音排除策略（Q4：排除真的生效了吗，还是被 include 覆盖重新纳入）。 */
 export type NoisePolicy = 'strict' | 'include-overridden' | 'none'
@@ -61,6 +62,11 @@ export interface CodeSearchTraceEntry {
   durationMs: number
   /** 是否成功（**失败与「无匹配」严格区分**：无匹配也 ok=true 且 count=0）。 */
   ok: boolean
+  /** 未截断的命中**总数**（诚实计数：`count` 是实际收集条数，本字段是 rg 输出里的真实总数；
+   *  缺省 = 与 count 相同，即未截断）。把「共 N」写成截断值曾是本插件的一处误导，本字段修它。 */
+  total?: number
+  /** 是否因上限截断（`total > count`）。 */
+  truncated?: boolean
   /** 失败原因（spawn 失败分类 / 信号终止 / rg stderr）。 */
   error?: string
 }
@@ -71,14 +77,18 @@ export interface TraceConfig {
   noiseExcludes: string[]
 }
 
-/** 一次检索的参数摘要来源（`SearchArgs` / `LocateArgs` 的结构上界）。 */
+/** 一次检索的参数摘要来源（`SearchArgs` / `LocateArgs` / `SymbolsArgs` 的结构上界）。 */
 export interface TraceArgs {
   pattern?: string
   term?: string
+  /** `code_impact` 的符号名（与 pattern/term 同属「查询输入侧」，用于轨迹 Q2 复现）。 */
+  symbol?: string
   path?: string
   include?: string
   exclude?: string
   maxResults?: number
+  /** `code_symbols` / `code_impact` 的文件上限。 */
+  maxFiles?: number
 }
 
 /** 参数摘要（`describeQueryScope` 的产物；boot 行也能复用同一形状）。 */
@@ -169,18 +179,21 @@ export function noisePolicyOf(noiseGlobs: number, includeOverride: boolean): Noi
   return includeOverride ? 'include-overridden' : 'strict'
 }
 
-/** 参数摘要（纯函数）：根路径回落 / include / exclude / 噪音条数 / 策略 / 上限缺省值。 */
-export function describeQueryScope(args: TraceArgs, cfg: TraceConfig, op: 'search' | 'locate'): QueryScope {
+/** 参数摘要（纯函数）：根路径回落 / include / exclude / 噪音条数 / 策略 / 上限缺省值。
+ *  各工具缺省上限：`code_search`=50 条匹配、`code_locate`=30 个文件、`code_symbols`=40 个文件。 */
+export function describeQueryScope(args: TraceArgs, cfg: TraceConfig, op: 'search' | 'locate' | 'symbols' | 'impact'): QueryScope {
   const include = args.include ?? ''
   const noiseGlobs = cfg.noiseExcludes.length
   return {
     root: args.path || cfg.defaultPath,
     include,
-    // `code_locate` 的 argv 不含调用方 exclude（`buildLocateArgv` 只吃 cfg.noiseExcludes）
-    exclude: op === 'search' ? args.exclude ?? '' : '',
+    // argv 差异：`buildLocateArgv` 不吃调用方 exclude，`buildSearchArgv`/`buildFilesArgv` 吃
+    exclude: op === 'locate' ? '' : args.exclude ?? '',
     noiseGlobs,
     noisePolicy: noisePolicyOf(noiseGlobs, include !== ''),
-    maxResults: args.maxResults ?? (op === 'search' ? 50 : 30),
+    maxResults: op === 'symbols' || op === 'impact'
+      ? args.maxFiles ?? (op === 'symbols' ? 40 : 4000)
+      : args.maxResults ?? (op === 'search' ? 50 : 30),
   }
 }
 
@@ -241,6 +254,8 @@ export function serializeTraceEntry(entry: CodeSearchTraceEntry): string {
     count: entry.count,
     durationMs: entry.durationMs,
     ok: entry.ok,
+    ...(entry.total !== undefined ? { total: entry.total } : {}),
+    ...(entry.truncated !== undefined ? { truncated: entry.truncated } : {}),
     ...(entry.error !== undefined ? { error: entry.error } : {}),
   }
   return JSON.stringify(ordered)

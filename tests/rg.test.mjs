@@ -5,7 +5,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  resolveRgPath, resolveRoot, buildExcludes, buildSearchArgv, buildLocateArgv,
+  resolveRgPath, resolveRoot, buildExcludes, buildSearchArgv, buildLocateArgv, buildFilesArgv,
   classifyRgOutcome, parseRgJsonLines, parseFileList, rgFailureResult,
 } from '../lib/rg.js'
 
@@ -138,37 +138,76 @@ test('classifyRgOutcome: 边界——stderr 超长被截到 500 字符', () => {
 
 const J = (o) => JSON.stringify(o)
 
-test('parseRgJsonLines: 正常路径——只收 match 记录，剥掉行尾换行', () => {
+test('parseRgJsonLines: 正常路径——只收 match 记录，剥掉行尾换行；返回 matches/total/truncated 三件', () => {
   const stdout = [
     J({ type: 'begin', data: {} }),
     J({ type: 'match', data: { path: { text: 'a.ts' }, line_number: 3, lines: { text: 'hello\n' } } }),
     J({ type: 'context', data: {} }),
     J({ type: 'end', data: {} }),
   ].join('\n')
-  assert.deepEqual(parseRgJsonLines(stdout, 50), [{ path: 'a.ts', lineNo: 3, text: 'hello' }])
+  assert.deepEqual(parseRgJsonLines(stdout, 50), {
+    matches: [{ path: 'a.ts', lineNo: 3, text: 'hello' }],
+    total: 1,
+    truncated: false,
+  })
 })
 
 test('parseRgJsonLines: 失败路径——非 JSON 行 / 空行 / 半截 JSON 全部跳过，不抛', () => {
   const stdout = ['not json', '', '   ', '{"type":"match","data":{"path":{"text":"ok"}}}', '{broken']
     .join('\n')
-  assert.deepEqual(parseRgJsonLines(stdout, 50), [{ path: 'ok', lineNo: 0, text: '' }])
+  assert.deepEqual(parseRgJsonLines(stdout, 50), {
+    matches: [{ path: 'ok', lineNo: 0, text: '' }],
+    total: 1,
+    truncated: false,
+  })
 })
 
 test('parseRgJsonLines: 退化路径——空输出 / 缺字段按默认值兜底', () => {
-  assert.deepEqual(parseRgJsonLines('', 50), [])
+  assert.deepEqual(parseRgJsonLines('', 50), { matches: [], total: 0, truncated: false })
   assert.deepEqual(
     parseRgJsonLines(J({ type: 'match', data: {} }), 50),
-    [{ path: '', lineNo: 0, text: '' }],
+    { matches: [{ path: '', lineNo: 0, text: '' }], total: 1, truncated: false },
   )
-  assert.deepEqual(parseRgJsonLines(J({ data: {} }), 50), [], 'type 非 match 一律忽略')
-  assert.deepEqual(parseRgJsonLines(J({ type: 'match' }), 50), [], '无 data 一律忽略')
+  assert.deepEqual(parseRgJsonLines(J({ data: {} }), 50), { matches: [], total: 0, truncated: false }, 'type 非 match 一律忽略')
+  assert.deepEqual(parseRgJsonLines(J({ type: 'match' }), 50), { matches: [], total: 0, truncated: false }, '无 data 一律忽略')
 })
 
-test('parseRgJsonLines: 边界——cap 截断；cap=0 与负数 cap 均返回空（与 locate 的负数语义不同！）', () => {
+test('parseRgJsonLines: 边界——cap 截断时 total 必须是真实总数（诚实计数，2026-09-20 修）', () => {
   const stdout = [1, 2, 3].map((n) => J({ type: 'match', data: { path: { text: `f${n}` } } })).join('\n')
-  assert.equal(parseRgJsonLines(stdout, 2).length, 2)
-  assert.equal(parseRgJsonLines(stdout, 0).length, 0)
-  assert.equal(parseRgJsonLines(stdout, -1).length, 0, 'cap<0 时 results.length>=cap 恒真 → 空')
+  const r = parseRgJsonLines(stdout, 2)
+  assert.equal(r.matches.length, 2)
+  assert.equal(r.total, 3, '修复前 render 把截断值当「共 N」→ 用户以为只有 2 处命中')
+  assert.equal(r.truncated, true)
+  assert.deepEqual(parseRgJsonLines(stdout, 3), { matches: expect3(), total: 3, truncated: false }, '刚好装满上限不算截断')
+  assert.deepEqual(parseRgJsonLines(stdout, 0), { matches: [], total: 3, truncated: true }, 'cap=0 不收集但仍数准')
+  assert.deepEqual(parseRgJsonLines(stdout, -1), { matches: [], total: 3, truncated: true }, 'cap<0 与 cap=0 同义：不收集')
+})
+
+function expect3() {
+  return [1, 2, 3].map((n) => ({ path: `f${n}`, lineNo: 0, text: '' }))
+}
+
+/* ── buildFilesArgv：code_symbols 的 --files argv ── */
+
+test('buildFilesArgv: 结构 = --files --color never → 排除 globs → include → 根路径（无 --regexp）', () => {
+  assert.deepEqual(buildFilesArgv({ include: '*.ts', path: 'D:/r' }, CFG), [
+    '--files', '--color', 'never',
+    '--glob', '!**/node_modules/**', '--glob', '!**/.git/**',
+    '--glob', '*.ts',
+    'D:/r',
+  ])
+})
+
+test('buildFilesArgv: 调用方 exclude 生效（与 locate 不同：symbols 吃 exclude）', () => {
+  const argv = buildFilesArgv({ exclude: '**/tests/**' }, CFG)
+  assert.ok(argv.includes('!**/tests/**'))
+  assert.equal(argv[argv.length - 1], 'E:/alice', '根路径永远在最后')
+})
+
+test('buildFilesArgv: 空 include 不产生额外 glob；空 path 回落配置根', () => {
+  const argv = buildFilesArgv({}, CFG)
+  assert.equal(argv.filter((a) => a === '--glob').length, CFG.noiseExcludes.length)
+  assert.equal(argv[argv.length - 1], 'E:/alice')
 })
 
 /* ── parseFileList：--files-with-matches 输出解析 ── */

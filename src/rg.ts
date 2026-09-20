@@ -30,11 +30,29 @@ export interface LocateArgs {
   maxResults?: number
 }
 
+/** `code_symbols` 的参数面（列文件 + 上限）。 */
+export interface SymbolsArgs {
+  path?: string
+  include?: string
+  exclude?: string
+  maxFiles?: number
+}
+
 export interface SearchMatch {
   path: string
   lineNo: number
   text: string
   error?: string
+}
+
+/** `parseRgJsonLines` 的产物：**计数与列表分离**（见函数注释里的诚实计数说明）。 */
+export interface RgParseResult {
+  /** 收集到的匹配（最多 `cap` 条）。 */
+  matches: SearchMatch[]
+  /** 输出里 `match` 记录的**总数**（≥ `matches.length`）。 */
+  total: number
+  /** 是否因 `cap` 截断（`total > matches.length`）。 */
+  truncated: boolean
 }
 
 /** rg 的 `--json` 记录形状（只声明用到的字段） */
@@ -84,6 +102,16 @@ export function buildLocateArgv(args: LocateArgs, cfg: RgConfig): string[] {
   return argv
 }
 
+/** code_symbols 的 argv：`--files --color never` + 排除 globs + include glob + 根路径。
+ *  只列文件（不读内容）——内容解析在 `src/symbols.ts` 的纯函数里做，rg 只负责按规则挑文件。 */
+export function buildFilesArgv(args: SymbolsArgs, cfg: RgConfig): string[] {
+  const argv: string[] = ['--files', '--color', 'never']
+  for (const e of buildExcludes(cfg, args.exclude)) argv.push('--glob', e)
+  if (args.include) argv.push('--glob', args.include)
+  argv.push(resolveRoot(args.path, cfg))
+  return argv
+}
+
 /** rg 调用结果归类：**把「spawn 层失败」与「rg 退出码 1 = 无匹配」严格分开**。
  *
  *  已证实缺陷（修复前）：`err.code` 为字符串（`ENOENT`/`EACCES`）时被归一为数值 1——
@@ -107,28 +135,36 @@ export function classifyRgOutcome(err: unknown, stderr: string): { code: number;
   return { code, failure: stderr && code !== 1 ? stderr.slice(0, 500) : null }
 }
 
-/** 解析 rg `--json` 输出为匹配列表。
- *  - 空行 / 非 JSON 行 / 非 `match` 记录**静默跳过**（rg 会夹带 begin/end/summary 记录）
- *  - 达到 `cap` 后**仍在遍历**（只是不再收集）——保持原实现的短路语义
- *  - 缺字段（`path`/`line_number`/`lines`）按 `''` / `0` 兜底，行尾单个 `\n` 被剥掉 */
-export function parseRgJsonLines(stdout: string, cap: number): SearchMatch[] {
-  const results: SearchMatch[] = []
+/** 解析 rg `--json` 输出为匹配列表 + **诚实计数**。
+ *
+ *  - 空行 / 非 JSON 行 / 非 `match` 记录静默跳过（rg 会夹带 begin/end/summary 记录）
+ *  - **达到 `cap` 后仍然解析剩余记录**，只为把 `total` 数准（「共 ≥N」而不是把截断值当总数）。
+ *    代价：大输出时 JSON 解析量上升（诚实计数的必要成本，已在契约里声明）。
+ *  - 缺字段（`path`/`line_number`/`lines`）按 `''` / `0` 兜底，行尾单个 `\n` 被剥掉
+ *  - `cap <= 0` 时一条也不收集，但 `total` 仍数准
+ */
+export function parseRgJsonLines(stdout: string, cap: number): RgParseResult {
+  const matches: SearchMatch[] = []
+  let total = 0
   for (const line of stdout.split('\n')) {
-    if (!line.trim() || results.length >= cap) continue
+    if (!line.trim()) continue
+    let rec: RgJsonRecord
     try {
-      const rec = JSON.parse(line) as RgJsonRecord
-      if (rec.type !== 'match' || !rec.data) continue
-      results.push({
-        path: rec.data.path?.text ?? '',
-        lineNo: rec.data.line_number ?? 0,
-        text: (rec.data.lines?.text ?? '').replace(/\n$/, ''),
-      })
-    } catch { /* 非 JSON 行跳过 */ }
+      rec = JSON.parse(line) as RgJsonRecord
+    } catch { continue /* 非 JSON 行跳过 */ }
+    if (rec.type !== 'match' || !rec.data) continue
+    total += 1
+    if (matches.length >= cap) continue
+    matches.push({
+      path: rec.data.path?.text ?? '',
+      lineNo: rec.data.line_number ?? 0,
+      text: (rec.data.lines?.text ?? '').replace(/\n$/, ''),
+    })
   }
-  return results
+  return { matches, total, truncated: total > matches.length }
 }
 
-/** 解析 `--files-with-matches` 输出（一行一文件）。
+/** 解析 `--files-with-matches` / `--files` 输出（一行一文件）。
  *  **真实语义（不对称）**：`total` 是**未截断**的总数，`files` 才是截断后的列表——
  *  故 `total` 可大于 `files.length`（render 显示「共 N 个文件」而只列前 cap 个）。
  *  另注：负数 `cap` 走 `Array.slice(0, 负数)` 会**从尾部丢弃**而不是返回空。 */

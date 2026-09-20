@@ -1,29 +1,52 @@
 # 语义文档：dsh-code-search（本地大仓检索面）
 
-> 版本 v0.1 · 2026-09-14 · 作者：爱丽丝 · 状态：**draft**
+> 版本 v0.3 · 2026-09-20（初版 2026-09-14）· 作者：爱丽丝 · 状态：**implemented**
 > 开发方式：语义文档优先（先写清「是什么/什么关系/怎么裁决」，再让实现逼近，最后用实践回修）
-> 实现落点：`self-plugins/dsh-code-search/src/index.ts`（唯一源文件，172 行；构建产物 `lib/index.js`）
+> 实现落点：`self-plugins/dsh-code-search/src/`（`index.ts` 接线与 IO + `rg.ts` 纯逻辑 + `trace.ts` 自证轨迹 + `symbols.ts` 符号识别 + `graph.ts` 引用图层；构建产物 `lib/`）
 
 | 项 | 值 |
 |----|----|
 | 能力名 | dsh-code-search（插件内 `name = 'agent-code-search'`） |
 | 主副本路径 | `self-plugins/dsh-code-search/docs/semantic.md` |
-| 实现落点 | `self-plugins/dsh-code-search/src/index.ts` |
-| 版本 | `package.json` = 0.1.0 |
-| 组合行 | `E:\alice\.dsh\profiles\web\cordis.patch.yml` 行 231–233，`id: agent-code-search`，**无 config**（走全默认） |
-| 状态 | **draft**（实现已上线并挂载；本文为 2026-09-14 补课产物） |
+| 实现落点 | `self-plugins/dsh-code-search/src/`（5 个源文件） |
+| 版本 | `package.json` = 0.3.0 |
+| 组合行 | `E:\alice\.dsh\profiles\web\cordis.patch.yml`，`id: agent-code-search`，**无 config**（走全默认） |
+| 状态 | **implemented**（v0.3 已部署并线上实测；v0.2 的「3 工具」契约已被本版取代） |
+| 修订摘要 | v0.3（2026-09-20）：新增 `code_impact`（引用面/影响分析）——**导入归属 + 导出链可达性**的文件级精确反向引用图，零新增依赖；v0.2（2026-09-20）：新增 `code_symbols`、`code_search` 诚实计数；v0.1：`code_search` + `code_locate` |
 
 ---
 
 ## 1 · 定位与反定位
 
-**定位**：封装**系统 ripgrep**，把「在数十万文件的大仓里找一行」变成 2 个工具——`code_search`（全文检索，返回匹配行）与 `code_locate`（按概念/符号定位文件）。核心价值是**默认排除噪音**（`node_modules/.pnpm/dist/build/coverage/.git/lib/.dsh/_tmp_review`）后再检索。
+**定位**：封装**系统 ripgrep**，把「在大仓里找一个符号」变成 **4 个视角**：
+- `code_search`——**文本视角**：全文检索，返回匹配行（默认排除噪音）；
+- `code_locate`——**文件视角**：按概念/符号定位文件清单；
+- `code_symbols`——**结构视角**：一次调用拿到目录里定义了哪些符号（先给地图，再读文件）；
+- `code_impact`——**关系视角**：「改这个符号，谁会受影响」——定义点 + 精确引用者 + 未证实提及。
+
+前三者回答「**在哪**」，`code_impact` 回答「**改了会怎样**」。核心价值是**默认排除噪音**（`node_modules/.pnpm/dist/build/coverage/.git/lib/.dsh/_tmp_review`），以及**不需要编译器**就能给出文件级精确的引用关系。
+
+### 1.1 定位的参照物：与 ripwire 的能力对照（实测口径）
+
+`code_impact` 的动机来自 [ripwire](https://github.com/redhat-et/ripwire)（redhat-et，C++23 写的「AI 上下文的 ripgrep」，提供 `--callers`/`--impact`/`--affected`/`--test-gate` 等命令）。对照如下：
+
+| 维度 | ripwire 0.6.1 | 本插件 `code_impact` |
+|------|---------------|---------------------|
+| 解析层 | tree-sitter（**语法级**） | 导入归属 + 包名映射 + re-export 链可达性（**文件级精确**，TS/ESM） |
+| 同名消歧 | 靠名字匹配，`name-based` 级边自述为「猜」 | 靠**导入来源**消歧——同名符号各归各家（A27 尸体测试） |
+| 索引成本 | 全量重建（实测 deepseek-harness 12072 文件 **61.2 s**） | 每次现扫（实测 3198 文件 **744 ms** 建图） |
+| 依赖 | C++23 编译；**Windows 无原生 release** | **零新增依赖**（Node 内置 + 系统 rg） |
+| 粒度 | 函数级调用边 + Personalized PageRank 排序 | **文件级**（无调用点级、无排序） |
+| 语言 | 21 种 | TS/JS 族（图）；5 族（符号识别） |
+
+**诚实结论**：本工具**不是** ripwire 的全面替代——它没有函数级调用边、没有 PageRank 排序、没有 21 语言支持。它超越的是**单一维度**：在 TS/ESM 仓上，「谁引用了这个符号」可以**零依赖、亚秒、文件级精确**地回答，且每条边带**可核对的来源**，而不是靠名字猜。
 
 **反定位（本文不管什么）**：
 - 不管**语义检索/向量检索**（这是正则/字面匹配；语义检索属记忆库 `recall`）
 - 不管**文件内容编辑**（属 `edit`/`write`）
 - 不管**官方 `grep` 工具**：两者并存——官方 grep 走 harness 内建，本插件是**自研的高层封装**（更强调噪音排除与 Windows 盘符处理）
 - **不是**索引服务：零常驻进程、零倒排索引、每次调用现扫（用系统 rg 的并行扫描）
+- **不是**函数级调用图：`code_impact` 的粒度是**文件**，不回答「在第几行调用、调了几次」
 - **不是**二进制/压缩包检索器（rg 语义如下）
 
 ## 2 · 术语表
@@ -76,12 +99,36 @@ dsh-code-search · apply(ctx, config)
 | `rgPath` | string | `''` | 空 → 用 `'rg'` 走 PATH |
 | `noiseExcludes` | string[] | `['!**/node_modules/**','!**/.pnpm/**','!**/dist/**','!**/build/**','!**/coverage/**','!**/.git/**','!**/lib/**','!**/.dsh/**','!**/_tmp_review/**']` | 负向 glob（注意含 **`lib`**——构建产物默认不被检索） |
 
-### 4.2 工具契约（2 个）
+### 4.2 工具契约（4 个）
 
 | 工具 | 入参 | 出参 schema | cap |
 |------|------|-------------|-----|
-| `code_search` | `pattern`(必填)、`path?`、`include?`、`exclude?`、`maxResults?` | `{count, results:[{path,lineNo,text,error?}]}`；render 输出 `共 N 匹配（显示 M）` + 每行 `path:lineNo: text` | 50 |
-| `code_locate` | `term`(必填)、`path?`、`include?`、`maxResults?` | `{count, files:[string]}`；render 输出 `共 N 个文件` + 文件清单 | 30 |
+| `code_search` | `pattern`(必填)、`path?`、`include?`、`exclude?`、`maxResults?` | `{count, total, truncated, noiseGlobs, noisePolicy, results:[{path,lineNo,text,error?}]}`；render 头部 `共 N 匹配（未截断）` 或 `共 ≥N 匹配（截断：显示 M / 至少 N）` + `模式=regex \| 噪音排除=K 条（策略）`，其后每行 `path:lineNo: text` | 50 |
+| `code_locate` | `term`(必填)、`path?`、`include?`、`maxResults?` | `{count, files:[string]}`；render `共 N 个文件`（截断时 `共 N 个文件（显示 M）`）+ 文件清单 | 30 |
+| `code_symbols` | `path?`、`include?`、`exclude?`、`maxFiles?`、`maxSymbols?` | `{count, files, total, truncated, mode, symbols:[{path,kind,name,lineNo,sig}], error?}`；render `符号地图（mode=regex 正则近似，非 AST）：扫描 F 文件 / S 符号（已截断?）` + 按文件分组 `kind name (L行号)` | 文件 40 / 符号 300 |
+| `code_impact` | `symbol`(必填)、`path?`、`include?`、`exclude?`、`maxFiles?`、`maxResults?` | `{count, exact, unverifiedCount, scanned, files, truncated, mode, defs:[{path,lineNo}], refs:[{path,how,via?}], unverified:[{path,lines}], error?}`；render `引用面（mode=import-graph：导入归属 + 导出链可达性）：扫描 N 文件 \| 精确引用 M \| 未证实 K`，随后定义点清单（**为空时披露三种成因**，见下）+ 每个引用者一行 `[how] path ← '模块说明符'` | 文件 4000 / 每档 30 |
+
+**`code_impact` 的诚实分级词汇表（`how` 字段，闭集）**——这是本工具的核心纪律：每条边都要说清「我凭什么认为它引用了」：
+
+| `how` | 含义 | 精度 |
+|-------|------|------|
+| `import-direct` | 该文件的 import（或 re-export）子句显式列出该符号，且来源解析到**定义文件本身** | 精确 |
+| `import-chain` | 来源解析到**再导出者**，沿 re-export 链可达定义文件 | 精确（链路上每跳都是显式 import/export） |
+| `same-file` | 引用与定义在同一文件内（排除定义行本身） | 精确 |
+| `name-only` | 正文出现该名字但**无导入关系可证**——可能是同名符号、注释或字符串 | **未经证实**，单独成档 |
+
+末档**永不混入**引用者计数：`count` 只数前三档，`unverifiedCount` 单独给——把「猜的」和「证的」分开放，是 ripwire 的 `provenance` 分级教给本插件的做法。
+
+**`code_impact` 的静默归零披露**：定义文件若落在 `maxFiles` 之外，`definingSet` 会为空 ⇒ 所有引用退化为 `unverified`，输出看起来像「没人引用它」。故 render 在 **定义点为 0** 时显式列出三种成因（符号名不符 / 被截断 / 由动态方式引入），不让这种失效静默。
+
+**`code_search` 的诚实计数（2026-09-20 新增，`total`/`truncated`）**：`count` 是**实际收集条数**（≤cap），
+`total` 是 rg 输出里 `match` 记录的**真实总数**。修复前 render 把截断值当「共 N」⇒ 有 500 处命中时显示「共 50 匹配」，
+读者会以为只有 50 处。现在截断时显示 `共 ≥N`，并显式写「截断」。
+代价：达到 cap 后**仍要解析剩余记录**才能数准（大输出时 JSON 解析量上升，属诚实计数的必要成本）。
+
+**`code_symbols` 的诚实边界**：符号识别是**逐行正则近似**（TS/JS、Python、Rust、Go、Markdown 标题），
+**不是 AST**——多行签名、宏、代码生成、装饰器改写认不全；输出带 `mode=regex` 标注，
+触顶（文件/符号/单文件 512 KB）时 `truncated=true` 并在 render 里显示「已截断」。**不认识的语言不猜**（零符号，不报错）。
 
 `exclude` 的拼装：`'!' + args.exclude`（因此调用方传 `**/tests/**` 即得 `!**/tests/**`；**若自己写成 `!x` 会得到 `!!x`**，见 U3）。
 
@@ -183,6 +230,17 @@ dsh-code-search · apply(ctx, config)
 | A16 | **凭据不落盘**（隐私红线，含尸体测试） | `npm test` → `隐私尸体测试`：喂 `sk-live-…`/`ghp_…`/`api_key=hunter2secret`/`Authorization: Bearer <32位>` 四种 pattern → 断言落盘原文里 `includes(secret) === false`，且 `[redacted]` 确实出现（排除「没写进去」的假绿） | **已实测** |
 | A17 | 噪音排除策略在轨迹里可辨（含 include 覆盖） | `npm test` → `describeQueryScope` + `noisePolicyOf`：`strict` / `include-overridden` / `none` 三态；离线组合断言 include 存在时判 `include-overridden`（对应 §10 U4 语义） | **已实测** |
 | A18 | `build` 自报能回答「线上跑哪个构建」 | `npm test` → `buildStamp`：`1.2.3@<mtime>`；读不到版本退化为 `unknown@<mtime>`（不抛） | **已实测** |
+| A19 | `code_symbols` 在工具面且返回符号清单 | 会话工具列表含 `code_symbols`；对 `dsh-life-core/src`（include `*.ts`，maxFiles 8）线上实测返回 **8 文件 / 77 符号**，按文件分组 | **已实测（2026-09-20）** |
+| A20 | 符号识别压得住误报（形态约束生效） | 同目标同参数前后对照：修前 **243** 符号（含 `const dir`/`const text`/`method mkdirSync`/`method saveState` 等局部量与调用）→ 修后 **77**，局部 const 与方法调用误报 **0** | **已实测（2026-09-20，前后对照）** |
+| A21 | `code_search` 头部给**真实总数**而非截断值 | `code_search{pattern:'defineTool', include:'*.ts', maxResults:5}` → 头部 `共 ≥325 匹配（截断：显示 5 / 至少 325）`（修前显示「共 5 匹配（显示 5）」） | **已实测（2026-09-20）** |
+| A22 | 头部披露匹配模式与噪音排除策略 | 同上调用 → `模式=regex \| 噪音排除=9 条（include-overridden）`——「include 覆盖了噪音排除」这一陷阱对读者可见 | **已实测（2026-09-20）** |
+| A23 | 未知语言不猜 | `npm test` → `extractSymbols(…, 'txt')` 返回零符号且 `truncated=false`（不是报错） | **已实测（单测）** |
+| A24 | 触顶如实披露 | `npm test` → 10 行输入 + `maxSymbols=3` → `symbols.length=3, truncated=true`；刚好用满上限不算截断 | **已实测（单测）** |
+| A25 | `code_impact` 在工具面，且一次调用给出定义点 / 精确引用者 / 未证实提及三档 | 线上调用 `code_impact{symbol:'defineTool', path:'…\\deepseek-harness\\packages', include:'*.ts'}` → render 头部 `扫描 3198 文件 \| 精确引用 47 \| 未证实 11`，定义点 2 条带行号（`schema.ts:545` / `tools.spec.ts:2762`） | **已实测（2026-09-20 线上）** |
+| A26 | 三层解析齐备：相对路径 / 包名映射 / re-export 链可达性 | 三层各自单独可证伪——① 单测 `resolveModule` 四态（rel / pkg-entry / pkg-sub / unresolved-pkg）；② 包名映射实测 298 个 package.json；③ 探测对照：只认相对路径时 45 个引用**精确归零**，补包名后仍 0/58，补导出链后 **45/58**（其中 43 个靠链） | **已实测（2026-09-20，三层逐层对照）** |
+| A27 | 同名符号靠**导入归属**消歧（尸体测试：名字匹配式实现在此会混淆） | `npm test` → `尸体测试：同名符号靠导入归属消歧`：两个包各有 `handle()`，`use1` 只能归 `p1`、`use2` 只能归 `p2`，`unverified` 为 0 | **已实测（单测）** |
+| A28 | **再导出者本身也是引用者**（原实现漏算，修正有前后对照） | 修正后线上读数（同 A25 参数）：精确 **47**、未证实 **11**；修正前（探测脚本版）为 45 / 12——差的那一笔正是 `core/tools/src/index.ts` 的 `defineTool,` re-export 行 | **已实测（2026-09-20 前后对照）** |
+| A29 | 定义点为 0 时**披露成因**（静默归零不再无声） | render 分支：`defs.length === 0` → 输出「可能是①符号名不符 ②被 maxFiles 截断 ③由 re-export/动态方式引入」；`npm test` 覆盖空图退化（零结果不抛） | **已实测（2026-09-20，源码分支 + 单测）** |
 
 ## 8 · 与实现的关系
 
@@ -195,6 +253,52 @@ dsh-code-search · apply(ctx, config)
   - `repository` 字段缺失（`package.json` 无 `repository`），GitHub 归属只能从 README 徽章推断。
 
 ## 9 · 实践修订记录
+
+- **2026-09-20 · v0.3：从「借鉴 ripwire」到「在单一维度上超越」——`code_impact` 引用图层** —— 主人指令「超越ripwire」
+  - **动机与定位**：v0.2 只借鉴了两条**思路**（先给地图、诚实计数），而 ripwire 的**核心能力**是调用图与影响面
+    （`--callers`/`--impact`/`--affected`），本插件此前完全没有。v0.3 的目标是**在 TS/ESM 仓这一个维度上**给出
+    比它更精确的答案，而**不假装全面超越**（它仍有函数级调用边、PageRank 排序、21 语言支持——对照表写进 §1.1）。
+  - **失败阶梯（本轮最有价值的产物）**：三层解析**不是设计出来的，是被实测一层层逼出来的**——
+    ① 只认相对路径 ⇒ 45 个引用**精确归零**（真实 monorepo 的引用几乎全走裸包名 `@scope/pkg`）；
+    ② 补了包名映射（扫 298 个 package.json 建 name→dir）仍 **0/58**——因为 import 落到**包入口** `index.ts`，
+    而定义在 `schema.ts`，入口只是 **re-export** 它；
+    ③ 补了 **re-export 链可达性**（BFS 沿 `export {X} from` / `export * from`）后 **45/58 精确**，其中 **43 个靠导出链**才成立。
+    **教训：在真实仓上「解析不到」往往不是算法错，而是对仓形态的假设错**——而假设错一次精确率就是 0，
+    0 又与「真的没有引用」同形，正是本插件一直在防的那类静默失效。
+  - **语义被修正（假阴性，由双向核对暴露）**：抽查降级档时发现 `core/tools/src/index.ts` 的 `defineTool,`
+    是 **re-export 清单**——**再导出者本身也是引用者**（它依赖被导出的符号），此前漏算。
+    修正后线上实测：精确 45→**47**、未证实 12→**11**（那一笔从降级档移进精确档，前后对照即为证据）。
+  - **语义被补充（静默归零披露）**：定义文件若被 `maxFiles` 截断在扫描范围外，`definingSet` 为空 ⇒
+    **所有引用退化成 `unverified`**，输出看起来像「没人引用它」。两处处置：缺省 `maxFiles` 2000→**4000**
+    （实测 DSH packages 有 3623 个 .ts/.tsx）+ render 在**定义点为 0 时列出三种成因**。
+  - **实测读数**（`E:\alice\deepseek-harness\packages`，3198 文件）：建图 **744 ms**（对照 ripwire 在 12072 文件上 61.2 s）；
+    线上调用 `code_impact{defineTool}` → 扫描 3198 文件 / **精确引用 47** / 未证实 11 / 定义点 2（带行号）。
+  - **可测试性**：逻辑全在 `src/graph.ts` 的**纯函数**里（文件存在性由调用方注入 `fileExists` ⇒ 不碰磁盘），
+    配 `tests/graph.test.mjs` **11 条**；含**同名消歧尸体测试**（两个包各有一个 `handle()`：按名字匹配会把
+    引用同时归到两个定义，按导入归属只能各归各家）——这条就是「为什么这条路比名字匹配强」的机器判据。
+  - **测试首跑 3 红的三分类**：① 注释掉的 `import` 被正则当真引用（**实现该修** ⇒ 加行首注释过滤）；
+    ② `parseReexports` 两趟正则令输出顺序不忠实于源码（**实现该修** ⇒ 按 index 排序）；
+    ③ `candidatePaths` 的断言写错（**我的预期错** ⇒ 对 `.ts` 写入断言「去扩展名形态」本就不成立，改为验证 `.js`→`.ts` 映射）。
+
+- **2026-09-20 · v0.2：借鉴 ripwire 思路做两项增强（符号地图 + 诚实计数）** —— 主人指令「借鉴思路增强本地插件」
+  - **语义被补充（新工具）**：`code_symbols` 补上**结构视角**（此前只有字符串视角 `code_search` 与文件视角 `code_locate`）——
+    「先给地图，再读文件」：一次调用拿到目录里定义了哪些 function/class/interface/type/const 及行号，省掉逐个 read。
+    诚实标注随输出走：`mode=regex`（正则近似，非 AST）+ 触顶时 `已截断`。
+  - **语义被修正（我自己的实现缺陷，被线上实测抓出）**：首版符号识别把 TS/JS 的**函数内局部 const**（`const dir = …`）
+    与**缩进的方法调用**（`mkdirSync(dir, {…})`、`saveState(state)`）都当成了定义 ⇒ 对 8 个文件报出 **243** 个「符号」，
+    大半是噪音。根因：正则下「模块级定义」与「局部量/调用」**完全同形**，唯一可分的形态是
+    **行首缩进**（`const` 只收顶格）与**行尾字符**（方法定义以 `{` 收尾，调用以 `)`/`;` 收尾）。
+    加这两条形态约束后降到 **77** 符号，误报 0（A20 前后对照）。
+  - **教训**：**正则近似法的质量不取决于正则写得多全，而取决于有没有用「形态约束」把同形的高频噪音分开**。
+    不做这一步的产物比「没有工具」更坏——它看起来丰富，实际是流水账，还会消耗读者的注意力。
+  - **语义被补充（诚实计数）**：`code_search` 的「共 N」此前是**截断值**（`count` = 实际收集条数）——
+    500 处命中时显示「共 50 匹配」，读者会以为只有 50 处。改为 `total`（rg 输出里 match 记录的真实总数）+ `truncated`，
+    render 截断时写 `共 ≥N`。**代价显式**：达 cap 后仍需解析剩余记录才能数准（诚实计数不是免费的）。
+  - **行为变更清单**：① `code_search` 出参加 `total`/`truncated`/`noiseGlobs`/`noisePolicy`（schema 与 render 同步）；
+    ② 轨迹加 `symbols` 阶段与 `total`/`truncated` 可选字段；③ 新工具 `code_symbols`；④ 新源文件 `src/symbols.ts` + `tests/symbols.test.mjs`。
+    **正常路径的既有输出语义不变**（`code_search` 的匹配行、`code_locate` 的清单逐字未变），仅头部多一行披露。
+  - **部署**：`tsc` 构建 → `npm test` **69/69 过** → `preflight_check(full)` → 哨兵重启（两轮：首版部署 + 误报修复部署），
+    每轮都以**线上真实调用**复验（A19–A22）。
 
 - **2026-09-14 · 静默失败缺陷：rg 缺失被伪装成「无匹配」（已修 + 加机器守卫）**
   - **症状**：`rg` 不在 PATH（或 `Config.rgPath` 指向不存在的文件）时，`code_search` 返回 `{count:0}`、
