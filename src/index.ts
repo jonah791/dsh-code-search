@@ -473,6 +473,7 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.tools.register(defineTool({
     name: 'code_search',
+    deferLoading: true,
     description: '智能全文检索（rg 封装）：默认排除 node_modules/.pnpm/dist/build/coverage/.git 等噪音目录。可指定根路径（缺省 E:/alice）、include/exclude glob 过滤、正则模式。比通用 grep 更适合搜大仓源码（排除噪音+输出精简）。结果头部披露真实总数（截断时显示「≥N」）与噪音排除策略。',
     parameters: {
       pattern: { type: 'string', required: true, description: '正则或字面模式（rg 语法）' },
@@ -514,6 +515,7 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.tools.register(defineTool({
     name: 'code_locate',
+    deferLoading: true,
     description: '按概念/符号定位文件：搜哪些文件包含某词（rg --files-with-matches 语义），排除噪音后返回文件清单——用于「X 在哪个文件」的快速定位。',
     parameters: {
       term: { type: 'string', required: true, description: '定位词（如 anonymousUserId / runPreflightCore）' },
@@ -545,6 +547,7 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.tools.register(defineTool({
     name: 'code_symbols',
+    deferLoading: true,
     description: '符号地图（先给地图，再读文件）：列出一个目录/glob 下**定义了哪些函数/类/接口/类型/常量**及其行号，按文件分组。用于「我该读哪个文件」的快速定向，省掉逐个 read。识别是逐行正则近似（TS/JS/Python/Rust/Go/Markdown），非 AST——输出带 mode=regex 标注。',
     parameters: {
       path: { type: 'string', description: '搜索根路径（缺省 E:/alice）' },
@@ -590,6 +593,7 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.tools.register(defineTool({
     name: 'code_impact',
+    deferLoading: true,
     description: '引用面/影响分析（「改这个符号会波及谁」）：给定符号名，返回**定义点** + **精确引用者**（能沿 import / 包名 / re-export 链追到定义文件的）+ **未证实提及**（正文出现该名字但无导入关系可证，可能是同名/注释/字符串）。精度来自**导入归属**而非名字匹配——TS/ESM 仓上无需编译器。边界：只认 ESM 显式导入（动态 import()/require() 认不得），粒度是**文件**不是调用点。改动前的第三步：先看定义（code_symbols）、再看波及面（本工具）。',
     parameters: {
       symbol: { type: 'string', required: true, description: '符号名（如 defineTool / classifyRgOutcome）' },
@@ -650,6 +654,7 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.tools.register(defineTool({
     name: 'code_test_gate',
+    deferLoading: true,
     description: '测试闸门（「这批改动该跑什么」）：读 git 改动集 → 沿引用图**反向可达**（谁依赖这些改动）→ 挑出其中的测试文件 → 按包归组并给出**可直接执行的测试命令**。与 code_impact 的分工：后者答「改这个符号会波及谁」（输入符号名），本工具答「这批改动该跑什么」（输入 git 改动集，输出命令）。边界：git 只看**它所在那个仓**（子仓内部改动在主仓视角是 gitlink，看不到）；`?? 目录/` 形态的未追踪目录不展开（计入「未展开」如实披露）；测试识别是**命名约定**（*.test.* / *.spec.* / tests/ 目录），故意取宽——多跑比漏跑便宜。',
     parameters: {
       path: { type: 'string', description: '仓根路径（缺省 E:/alice）' },
